@@ -1,5 +1,5 @@
 """
-담다(Damda) — 동영상 다운로더  (goodseed AI LAB)
+담다(Damda) — 동영상 다운로더  (THEJOYMAN)
 
 - 영상·재생목록·채널 링크를 붙여넣고 [다운로드] → 큐에 쌓여 순서대로 받음
 - 동영상(MP4) / MP3 모드, 화질·음질 선택
@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     sys.exit(1)
 
 APP_NAME = "담다"
-APP_SUB = "goodseed AI LAB"
+APP_SUB = "THEJOYMAN"
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))  # PyInstaller 대응
 DATA_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 SETTINGS_FILE = DATA_DIR / "settings.json"

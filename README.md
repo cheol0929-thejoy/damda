@@ -1,4 +1,4 @@
-# 담다(Damda) — 동영상 다운로더 (goodseed AI LAB)
+# 담다(Damda) — 동영상 다운로더 (THEJOYMAN)
 
 ## 설치·실행 (윈도우, 3단계)
 1. Python 설치: https://www.python.org/downloads/  → 설치 화면에서 **Add python.exe to PATH** 체크
