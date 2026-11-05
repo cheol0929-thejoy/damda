@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: '0 18 * * 0'   # 매주 월요일 03:00 KST, 최신 yt-dlp로 재빌드
 permissions:
   contents: write
 jobs:
@@ -19,7 +21,9 @@ jobs:
         run: |
           import imageio_ffmpeg, shutil
           shutil.copy(imageio_ffmpeg.get_ffmpeg_exe(), "ffmpeg.exe")
-      - run: pyinstaller --onefile --windowed --name damda --icon damda.ico --add-binary "ffmpeg.exe;." --add-data "damda.ico;." damda.py
+      - name: Stamp version
+        run: echo v${{ github.run_number }} > VERSION
+      - run: pyinstaller --onefile --windowed --name damda --icon damda.ico --add-binary "ffmpeg.exe;." --add-data "damda.ico;." --add-data "VERSION;." damda.py
       - uses: actions/upload-artifact@v4
         with:
           name: damda-windows

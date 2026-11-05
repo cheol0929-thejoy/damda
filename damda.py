@@ -17,6 +17,8 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import urllib.request
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -40,10 +42,24 @@ except ImportError:  # pragma: no cover
 
 APP_NAME = "담다"
 APP_SUB = "THEJOYMAN"
+GITHUB_REPO = "cheol0929-thejoy/damda"
+UPDATE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+UPDATE_EXE = f"https://github.com/{GITHUB_REPO}/releases/latest/download/damda.exe"
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))  # PyInstaller 대응
 DATA_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 SETTINGS_FILE = DATA_DIR / "settings.json"
 SUBS_FILE = DATA_DIR / "subscriptions.json"
+
+
+def app_version() -> int:
+    """빌드 때 VERSION 파일에 적힌 번호(GitHub 릴리스 vN). 개발 중이면 0."""
+    try:
+        return int((BASE_DIR / "VERSION").read_text().strip().lstrip("v"))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+APP_VERSION = app_version()
 
 VIDEO_QUALITY = {
     "최고 화질": "bestvideo+bestaudio/best",
@@ -269,6 +285,69 @@ class InfoWorker(QThread):
             self.result.emit([(info.get("webpage_url") or self.url, info.get("title") or "")], "")
 
 
+# ---------------------------------------------------------------- 자동 업데이트
+
+
+class UpdateChecker(QThread):
+    found = Signal(int)          # 새 버전 번호
+
+    def run(self):
+        try:
+            req = urllib.request.Request(UPDATE_API, headers={"User-Agent": "damda"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                tag = json.load(r).get("tag_name", "")
+            latest = int(str(tag).lstrip("v"))
+        except Exception:  # noqa: BLE001
+            return
+        if APP_VERSION and latest > APP_VERSION:
+            self.found.emit(latest)
+
+
+class UpdateDownloader(QThread):
+    progress = Signal(float)
+    done = Signal(str)           # 받은 파일 경로
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            target = Path(tempfile.gettempdir()) / "damda_update.exe"
+            req = urllib.request.Request(UPDATE_EXE, headers={"User-Agent": "damda"})
+            with urllib.request.urlopen(req, timeout=30) as r, open(target, "wb") as f:
+                total = int(r.headers.get("Content-Length") or 0)
+                got = 0
+                while True:
+                    chunk = r.read(1024 * 256)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+                    if total:
+                        self.progress.emit(got / total * 100)
+            if target.stat().st_size < 10_000_000:
+                raise RuntimeError("받은 파일이 너무 작습니다.")
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
+            return
+        self.done.emit(str(target))
+
+
+def apply_update(new_exe: str):
+    """현재 exe를 새 파일로 바꾸고 다시 실행하는 배치 파일을 띄운 뒤 종료한다."""
+    cur = Path(sys.executable).resolve()
+    bat = Path(tempfile.gettempdir()) / "damda_update.bat"
+    bat.write_text(
+        "@echo off\r\nchcp 65001 >nul\r\ntimeout /t 2 /nobreak >nul\r\n"
+        ":retry\r\n"
+        f'move /y "{new_exe}" "{cur}" >nul 2>&1 || (timeout /t 1 /nobreak >nul & goto retry)\r\n'
+        f'start "" "{cur}"\r\n'
+        'del "%~f0"\r\n',
+        encoding="utf-8",
+    )
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    subprocess.Popen(["cmd", "/c", str(bat)], creationflags=flags, close_fds=True)
+    QApplication.quit()
+
+
 # ---------------------------------------------------------------- 스타일
 
 STYLE = """
@@ -298,6 +377,8 @@ QProgressBar::chunk { background: #e53935; border-radius: 4px; }
 QFrame#card { background: transparent; }
 QLabel#muted { color: #b89a9d; }
 QLabel#footer { color: #b89a9d; font-size: 12px; }
+QFrame#update { background: #3a2a10; border-bottom: 1px solid #6b4e1a; }
+QLabel#update { color: #ffd54f; }
 QFrame#footer { background: #241618; border-top: 1px solid #3b2426; }
 QCheckBox { spacing: 8px; }
 """
@@ -402,6 +483,9 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
         self._timer.start(500)
+        self._upd_threads: list[QThread] = []
+        if getattr(sys, "frozen", False):
+            QTimer.singleShot(1500, self._check_update)
 
     # ---------- 화면
     def _build(self):
@@ -411,6 +495,7 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         v.addWidget(self._header())
+        v.addWidget(self._update_bar())
         v.addWidget(self._tabs(), 1)
         v.addWidget(self._footer())
 
@@ -604,6 +689,49 @@ class MainWindow(QMainWindow):
         v.addStretch(1)
         return w
 
+    def _update_bar(self) -> QFrame:
+        f = QFrame()
+        f.setObjectName("update")
+        h = QHBoxLayout(f)
+        h.setContentsMargins(16, 6, 16, 6)
+        self.upd_label = QLabel("")
+        self.upd_label.setObjectName("update")
+        h.addWidget(self.upd_label, 1)
+        self.upd_btn = QPushButton("지금 업데이트")
+        self.upd_btn.setObjectName("primary")
+        self.upd_btn.clicked.connect(self._start_update)
+        h.addWidget(self.upd_btn)
+        b = QPushButton("나중에")
+        b.clicked.connect(f.hide)
+        h.addWidget(b)
+        f.hide()
+        self.upd_bar = f
+        return f
+
+    # ---------- 자동 업데이트
+    def _check_update(self):
+        w = UpdateChecker()
+        w.found.connect(self._on_update_found)
+        self._upd_threads.append(w)
+        w.start()
+
+    def _on_update_found(self, latest: int):
+        self.upd_label.setText(f"새 버전 v{latest}이 있습니다. (지금 v{APP_VERSION})  업데이트하면 프로그램이 잠시 닫혔다 다시 열립니다.")
+        self.upd_bar.show()
+
+    def _start_update(self):
+        if any(it.status == "진행" for it in self.items.values()):
+            QMessageBox.information(self, "업데이트", "다운로드가 진행 중입니다. 끝나거나 일시정지한 뒤 업데이트하세요.")
+            return
+        self.upd_btn.setEnabled(False)
+        self.upd_label.setText("새 버전을 받는 중… 0%")
+        w = UpdateDownloader()
+        w.progress.connect(lambda p: self.upd_label.setText(f"새 버전을 받는 중… {p:.0f}%"))
+        w.failed.connect(lambda m: (self.upd_label.setText(f"업데이트 실패: {m}"), self.upd_btn.setEnabled(True)))
+        w.done.connect(apply_update)
+        self._upd_threads.append(w)
+        w.start()
+
     def _footer(self) -> QFrame:
         f = QFrame()
         f.setObjectName("footer")
@@ -617,7 +745,7 @@ class MainWindow(QMainWindow):
         b = QPushButton("정보")
         b.setFlat(True)
         b.clicked.connect(lambda: QMessageBox.information(
-            self, "정보", f"{APP_NAME}\n{APP_SUB}\n\nyt-dlp {yt_dlp.version.__version__} · PySide6 · ffmpeg\n강의 실습용 오픈소스 조합입니다."))
+            self, "정보", f"{APP_NAME} v{APP_VERSION or 'dev'}\n{APP_SUB}\n\nyt-dlp {yt_dlp.version.__version__} · PySide6 · ffmpeg\n강의 실습용 오픈소스 조합입니다."))
         h.addWidget(b)
         return f
 
