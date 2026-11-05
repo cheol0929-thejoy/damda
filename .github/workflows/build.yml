@@ -1,0 +1,32 @@
+name: Build Windows exe
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Bundle ffmpeg
+        shell: python
+        run: |
+          import imageio_ffmpeg, shutil
+          shutil.copy(imageio_ffmpeg.get_ffmpeg_exe(), "ffmpeg.exe")
+      - run: pyinstaller --onefile --windowed --name damda --icon damda.ico --add-binary "ffmpeg.exe;." --add-data "damda.ico;." damda.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: damda-windows
+          path: dist/damda.exe
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: 담다 v${{ github.run_number }}
+          files: dist/damda.exe
