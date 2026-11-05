@@ -40,6 +40,11 @@ except ImportError:  # pragma: no cover
     QMessageBox.critical(None, "yt-dlp 없음", "yt-dlp가 설치되어 있지 않습니다.\n\npip install yt-dlp")
     sys.exit(1)
 
+if getattr(sys, "frozen", False):  # --windowed 빌드: 콘솔이 없으면 출력 대상을 만들어 둔다
+    for _n in ("stdout", "stderr"):
+        if getattr(sys, _n) is None:
+            setattr(sys, _n, open(os.devnull, "w", encoding="utf-8"))
+
 APP_NAME = "담다"
 APP_SUB = "THEJOYMAN"
 GITHUB_REPO = "cheol0929-thejoy/damda"
@@ -251,14 +256,22 @@ class DownloadWorker(QThread):
 
 
 class InfoWorker(QThread):
-    """링크가 영상 하나인지 재생목록·채널인지 알아내고 항목 목록을 돌려준다."""
-    result = Signal(list, str)   # [(url, title)], playlist_title
+    """링크가 영상 하나인지 재생목록·채널인지 알아내고 항목 목록을 돌려준다.
+    (신호는 반드시 MainWindow의 메서드에 연결한다 — 람다에 연결하면 워커 스레드에서 화면을 건드려 멈춘다)"""
+    result = Signal(list, str, str, str)        # [(url, title)], playlist_title, mode, quality
+    sub_result = Signal(dict, list, str, str)   # sub, [(url, title)], mode, quality
     failed = Signal(str)
-    channel = Signal(dict)       # 구독용 채널 정보
+    channel = Signal(dict)                      # 구독용 채널 정보
 
-    def __init__(self, url: str, limit: int = 0):
+    def __init__(self, url: str, limit: int = 0, mode: str = "video", quality: str = "", sub: dict | None = None):
         super().__init__()
-        self.url, self.limit = url, limit
+        self.url, self.limit, self.mode, self.quality, self.sub = url, limit, mode, quality, sub
+
+    def _emit_items(self, items: list, playlist: str):
+        if self.sub is not None:
+            self.sub_result.emit(self.sub, items, self.mode, self.quality)
+        else:
+            self.result.emit(items, playlist, self.mode, self.quality)
 
     def run(self):
         opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "skip_download": True}
@@ -281,12 +294,12 @@ class InfoWorker(QThread):
             self.channel.emit({"name": info.get("channel") or info.get("uploader") or info.get("title") or self.url,
                                "url": info.get("channel_url") or info.get("uploader_url") or self.url,
                                "seen": [e.get("id") for e in entries if e]})
-            self.result.emit(items, info.get("title") or "")
+            self._emit_items(items, info.get("title") or "")
         else:
             self.channel.emit({"name": info.get("channel") or info.get("uploader") or "",
                                "url": info.get("channel_url") or info.get("uploader_url") or "",
                                "seen": []})
-            self.result.emit([(info.get("webpage_url") or self.url, info.get("title") or "")], "")
+            self._emit_items([(info.get("webpage_url") or self.url, info.get("title") or "")], "")
 
 
 # ---------------------------------------------------------------- 자동 업데이트
@@ -739,11 +752,21 @@ class MainWindow(QMainWindow):
         self.upd_btn.setEnabled(False)
         self.upd_label.setText("새 버전을 받는 중… 0%")
         w = UpdateDownloader()
-        w.progress.connect(lambda p: self.upd_label.setText(f"새 버전을 받는 중… {p:.0f}%"))
-        w.failed.connect(lambda m: (self.upd_label.setText(f"업데이트 실패: {m}"), self.upd_btn.setEnabled(True)))
-        w.done.connect(apply_update)
+        w.progress.connect(self._on_update_progress)
+        w.failed.connect(self._on_update_failed)
+        w.done.connect(self._apply_update)
         self._upd_threads.append(w)
         w.start()
+
+    def _on_update_progress(self, p: float):
+        self.upd_label.setText(f"새 버전을 받는 중… {p:.0f}%")
+
+    def _on_update_failed(self, m: str):
+        self.upd_label.setText(f"업데이트 실패: {m}")
+        self.upd_btn.setEnabled(True)
+
+    def _apply_update(self, new_exe: str):
+        apply_update(new_exe)
 
     def _footer(self) -> QFrame:
         f = QFrame()
@@ -813,11 +836,15 @@ class MainWindow(QMainWindow):
             return
         mode, q = self._mode(), self.quality.currentText()
         self.statusBar().showMessage("링크를 확인하는 중…")
-        w = InfoWorker(u)
-        w.result.connect(lambda items, pl: self._queue_items(items, pl, mode, q))
-        w.failed.connect(lambda m: QMessageBox.critical(self, "링크 오류", m))
+        w = InfoWorker(u, mode=mode, quality=q)
+        w.result.connect(self._queue_items)
+        w.failed.connect(self._on_info_failed)
         self._keep(w)
         self.url.clear()
+
+    def _on_info_failed(self, msg: str):
+        self.statusBar().showMessage("링크를 읽지 못했습니다.", 4000)
+        QMessageBox.critical(self, "링크 오류", msg)
 
     def _queue_items(self, items: list, playlist: str, mode: str, q: str):
         for u, title in items:
@@ -839,8 +866,11 @@ class MainWindow(QMainWindow):
 
     def _keep(self, w: QThread):
         self._info_workers.append(w)
-        w.finished.connect(lambda: self._info_workers.remove(w) if w in self._info_workers else None)
+        w.finished.connect(self._reap_workers)
         w.start()
+
+    def _reap_workers(self):
+        self._info_workers = [t for t in self._info_workers if t.isRunning()]
 
     # ---------- 큐 실행
     def _pump(self):
@@ -863,7 +893,6 @@ class MainWindow(QMainWindow):
         w.failed.connect(self._on_fail)
         w.cancelled.connect(self._on_cancel)
         w.title_found.connect(self._on_title)
-        w.finished.connect(lambda: self.workers.pop(it.id, None))
         self.workers[it.id] = w
         w.start()
         self._refresh(it.id)
@@ -884,17 +913,20 @@ class MainWindow(QMainWindow):
             self._refresh(iid)
 
     def _on_done(self, iid, fp):
+        self.workers.pop(iid, None)
         it = self.items[iid]
         it.status, it.progress, it.filepath = "완료", 100, fp
         it.detail = fp or "완료"
         self._refresh(iid)
 
     def _on_fail(self, iid, msg):
+        self.workers.pop(iid, None)
         it = self.items[iid]
         it.status, it.detail = "오류", msg.splitlines()[0][:160]
         self._refresh(iid)
 
     def _on_cancel(self, iid):
+        self.workers.pop(iid, None)
         it = self.items[iid]
         if it.status == "진행":
             it.status = "일시정지"
@@ -964,7 +996,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("채널 정보를 확인하는 중…")
         w = InfoWorker(u, limit=30)
         w.channel.connect(self._on_channel)
-        w.failed.connect(lambda m: QMessageBox.critical(self, "구독 오류", m))
+        w.failed.connect(self._on_info_failed)
         self._keep(w)
 
     def _on_channel(self, ch: dict):
@@ -998,8 +1030,8 @@ class MainWindow(QMainWindow):
         mode, q = self._mode(), self.quality.currentText()
         self.statusBar().showMessage("새 영상을 확인하는 중…")
         for s in self.subs:
-            w = InfoWorker(s["url"], limit=30)
-            w.result.connect(lambda items, pl, s=s: self._on_sub_result(s, items, mode, q))
+            w = InfoWorker(s["url"], limit=30, mode=mode, quality=q, sub=s)
+            w.sub_result.connect(self._on_sub_result)
             self._keep(w)
 
     def _on_sub_result(self, s: dict, items: list, mode: str, q: str):
