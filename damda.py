@@ -122,7 +122,7 @@ def save_json(path: Path, data):
 
 @dataclass
 class Settings:
-    save_dir: str = str(Path.home() / "Downloads" / "goodseedown")
+    save_dir: str = str(Path.home() / "Downloads" / "THEJOYMAN")
     subtitles: bool = False
     sub_langs: str = "ko,en"
     playlist_subfolder: bool = True
