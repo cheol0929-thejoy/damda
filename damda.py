@@ -340,8 +340,9 @@ class UpdateDownloader(QThread):
                     got += len(chunk)
                     if total:
                         self.progress.emit(got / total * 100)
-            if target.stat().st_size < 10_000_000:
-                raise RuntimeError("받은 파일이 너무 작습니다.")
+            size = target.stat().st_size
+            if size < 10_000_000 or (total and size != total):
+                raise RuntimeError("파일을 끝까지 받지 못했습니다. 다시 시도해 주세요.")
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
             return
@@ -349,13 +350,25 @@ class UpdateDownloader(QThread):
 
 
 def apply_update(new_exe: str):
-    """현재 exe를 새 파일로 바꾸고 다시 실행하는 배치 파일을 띄운 뒤 종료한다."""
+    """현재 exe를 새 파일로 바꾸고 다시 실행하는 배치 파일을 띄운 뒤 종료한다.
+    이 프로세스가 완전히 끝난 것을 확인한 뒤에 파일을 바꿔야 'Python DLL을 읽을 수 없음' 오류가 나지 않는다."""
     cur = Path(sys.executable).resolve()
+    pid = os.getpid()
     bat = Path(tempfile.gettempdir()) / "damda_update.bat"
     bat.write_text(
-        "@echo off\r\nchcp 65001 >nul\r\ntimeout /t 2 /nobreak >nul\r\n"
+        "@echo off\r\n"
+        ":wait\r\n"
+        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (timeout /t 1 /nobreak >nul & goto wait)\r\n'
+        "timeout /t 1 /nobreak >nul\r\n"
+        "set n=0\r\n"
         ":retry\r\n"
-        f'move /y "{new_exe}" "{cur}" >nul 2>&1 || (timeout /t 1 /nobreak >nul & goto retry)\r\n'
+        f'move /y "{new_exe}" "{cur}" >nul 2>&1 && goto run\r\n'
+        "set /a n+=1\r\n"
+        "if %n% lss 30 (timeout /t 1 /nobreak >nul & goto retry)\r\n"
+        f'start "" "{cur}"\r\n'
+        'del "%~f0"\r\n'
+        "exit\r\n"
+        ":run\r\n"
         f'start "" "{cur}"\r\n'
         'del "%~f0"\r\n',
         encoding="utf-8",

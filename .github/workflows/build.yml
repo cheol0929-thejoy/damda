@@ -23,7 +23,7 @@ jobs:
           shutil.copy(imageio_ffmpeg.get_ffmpeg_exe(), "ffmpeg.exe")
       - name: Stamp version
         run: echo v${{ github.run_number }} > VERSION
-      - run: pyinstaller --onefile --windowed --name damda --icon damda.ico --add-binary "ffmpeg.exe;." --add-data "damda.ico;." --add-data "VERSION;." damda.py
+      - run: pyinstaller --onefile --windowed --clean --noupx --name damda --icon damda.ico --add-binary "ffmpeg.exe;." --add-data "damda.ico;." --add-data "VERSION;." damda.py
       - uses: actions/upload-artifact@v4
         with:
           name: damda-windows
