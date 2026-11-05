@@ -122,7 +122,7 @@ def save_json(path: Path, data):
 
 @dataclass
 class Settings:
-    save_dir: str = str(Path.home() / "Downloads" / "THEJOYMAN")
+    save_dir: str = str(Path.home() / "Videos" / "THEJOYMAN")
     subtitles: bool = False
     sub_langs: str = "ko,en"
     playlist_subfolder: bool = True
@@ -135,6 +135,10 @@ class Settings:
         for k, v in d.items():
             if hasattr(s, k):
                 setattr(s, k, v)
+        # 예전 기본 폴더를 그대로 쓰고 있으면 새 기본 폴더(동영상\THEJOYMAN)로 옮긴다
+        old_defaults = {str(Path.home() / "Downloads" / "THEJOYMAN"), str(Path.home() / "Downloads" / "goodseedown")}
+        if s.save_dir in old_defaults:
+            s.save_dir = cls().save_dir
         return s
 
     def save(self):
