@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -349,33 +350,46 @@ class UpdateDownloader(QThread):
         self.done.emit(str(target))
 
 
+def _clean_env() -> dict:
+    """PyInstaller exe 안에서 다른 PyInstaller exe를 띄울 때, 이전 실행의 임시폴더(_MEI…)를
+    물려받지 않도록 환경변수를 정리한다. (안 하면 'Failed to load Python DLL' 오류가 난다)"""
+    env = {k: v for k, v in os.environ.items() if not (k.startswith("_PYI") or k.startswith("_MEI"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
 def apply_update(new_exe: str):
-    """현재 exe를 새 파일로 바꾸고 다시 실행하는 배치 파일을 띄운 뒤 종료한다.
-    이 프로세스가 완전히 끝난 것을 확인한 뒤에 파일을 바꿔야 'Python DLL을 읽을 수 없음' 오류가 나지 않는다."""
+    """실행 중인 exe는 덮어쓸 수 없지만 이름은 바꿀 수 있다.
+    1) 현재 exe → damda_old.exe 로 이름 변경  2) 새 exe를 원래 이름으로 이동
+    3) 새 exe를 깨끗한 환경으로 실행  4) 이 프로그램 종료. damda_old.exe는 다음 실행 때 지운다."""
     cur = Path(sys.executable).resolve()
-    pid = os.getpid()
-    bat = Path(tempfile.gettempdir()) / "damda_update.bat"
-    bat.write_text(
-        "@echo off\r\n"
-        ":wait\r\n"
-        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (timeout /t 1 /nobreak >nul & goto wait)\r\n'
-        "timeout /t 1 /nobreak >nul\r\n"
-        "set n=0\r\n"
-        ":retry\r\n"
-        f'move /y "{new_exe}" "{cur}" >nul 2>&1 && goto run\r\n'
-        "set /a n+=1\r\n"
-        "if %n% lss 30 (timeout /t 1 /nobreak >nul & goto retry)\r\n"
-        f'start "" "{cur}"\r\n'
-        'del "%~f0"\r\n'
-        "exit\r\n"
-        ":run\r\n"
-        f'start "" "{cur}"\r\n'
-        'del "%~f0"\r\n',
-        encoding="utf-8",
-    )
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    subprocess.Popen(["cmd", "/c", str(bat)], creationflags=flags, close_fds=True)
+    old = cur.with_name(cur.stem + "_old.exe")
+    try:
+        old.unlink(missing_ok=True)
+    except OSError:
+        pass
+    os.replace(cur, old)
+    try:
+        shutil.move(new_exe, cur)
+    except Exception:
+        os.replace(old, cur)  # 되돌리기
+        raise
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen([str(cur)], cwd=str(cur.parent), env=_clean_env(), creationflags=flags, close_fds=True)
     QApplication.quit()
+
+
+def cleanup_old_exe():
+    """업데이트 뒤 남은 damda_old.exe 지우기 (이전 프로세스가 아직 닫히는 중이면 다음 기회에)."""
+    if not getattr(sys, "frozen", False):
+        return
+    cur = Path(sys.executable).resolve()
+    old = cur.with_name(cur.stem + "_old.exe")
+    for _ in range(1):
+        try:
+            old.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- 스타일
@@ -521,6 +535,8 @@ class MainWindow(QMainWindow):
         self._upd_threads: list[QThread] = []
         if getattr(sys, "frozen", False):
             QTimer.singleShot(1500, self._check_update)
+            QTimer.singleShot(4000, cleanup_old_exe)
+            QTimer.singleShot(30000, cleanup_old_exe)
 
     # ---------- 화면
     def _build(self):
@@ -786,7 +802,13 @@ class MainWindow(QMainWindow):
         self.upd_btn.setEnabled(True)
 
     def _apply_update(self, new_exe: str):
-        apply_update(new_exe)
+        try:
+            apply_update(new_exe)
+        except Exception as e:  # noqa: BLE001
+            self.upd_btn.setEnabled(True)
+            self.upd_label.setText("자동 교체에 실패했습니다. 공유 페이지나 GitHub에서 새 버전을 직접 받아 주세요.")
+            QMessageBox.warning(self, "업데이트", f"프로그램 파일을 바꾸지 못했습니다.\n{e}\n\n"
+                                f"직접 받기: {UPDATE_EXE}")
 
     def _footer(self) -> QFrame:
         f = QFrame()
