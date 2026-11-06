@@ -29,7 +29,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QSpinBox, QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 
 try:
@@ -402,8 +402,8 @@ QTabBar::tab:selected { color: #f3e9e9; border-bottom: 2px solid #e53935; }
 QListWidget { background: #1a0f10; border: none; }
 QListWidget::item { border-bottom: 1px solid #332022; }
 QListWidget::item:selected { background: #241618; }
-QProgressBar { background: #2a1b1d; border: none; border-radius: 4px; height: 8px; text-align: center; color: transparent; }
-QProgressBar::chunk { background: #e53935; border-radius: 4px; }
+QProgressBar { background: #2f2022; border: none; border-radius: 2px; max-height: 3px; min-height: 3px; text-align: center; color: transparent; }
+QProgressBar::chunk { background: #e53935; border-radius: 2px; }
 QFrame#card { background: transparent; }
 QLabel#muted { color: #b89a9d; }
 QLabel#footer { color: #b89a9d; font-size: 12px; }
@@ -445,7 +445,8 @@ class ItemWidget(QFrame):
         self.setObjectName("card")
         self.item, self.owner = item, owner
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
         top = QHBoxLayout()
         self.title = QLabel(item.title or item.url)
         self.title.setStyleSheet("font-weight: bold;")
@@ -456,7 +457,8 @@ class ItemWidget(QFrame):
         lay.addLayout(top)
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
-        self.bar.setFixedHeight(8)
+        self.bar.setFixedHeight(3)
+        self.bar.setTextVisible(False)
         lay.addWidget(self.bar)
         bottom = QHBoxLayout()
         self.detail = QLabel(item.detail)
@@ -481,7 +483,9 @@ class ItemWidget(QFrame):
         self.title.setText(it.title or it.url)
         self.status.setText(it.status)
         self.bar.setValue(int(it.progress))
+        self.bar.setVisible(it.status in ("진행", "일시정지", "대기"))
         self.detail.setText(it.detail)
+        self.detail.setStyleSheet("font-size: 12px; color: #9a7f82;" if it.status == "완료" else "")
         self.btn_pause.setVisible(it.status in ("진행", "대기"))
         self.btn_resume.setVisible(it.status in ("일시정지", "오류", "취소"))
         self.btn_cancel.setVisible(it.status not in ("완료",))
@@ -498,7 +502,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} — 동영상 다운로더")
         self.resize(1160, 800)
-        self.setMinimumWidth(760)
+        self.setMinimumWidth(780)
         ico = BASE_DIR / "damda.ico"
         if ico.exists():
             self.setWindowIcon(QIcon(str(ico)))
@@ -557,7 +561,7 @@ class MainWindow(QMainWindow):
         row1 = QHBoxLayout()
         self.url = QLineEdit()
         self.url.setPlaceholderText("영상·재생목록·채널 링크를 붙여넣으세요")
-        self.url.setMinimumWidth(320)
+        self.url.setMinimumWidth(200)
         self.url.setMinimumHeight(34)
         self.url.returnPressed.connect(self.add_download)
         row1.addWidget(self.url, 1)
@@ -579,9 +583,12 @@ class MainWindow(QMainWindow):
         for b in (self.btn_video, self.btn_audio):
             b.setObjectName("seg")
             b.setCheckable(True)
+            b.setMinimumWidth(60)
+            b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             b.clicked.connect(self._mode_changed)
             sl.addWidget(b)
         self.btn_video.setChecked(True)
+        seg.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         row2.addWidget(seg)
         row2.addWidget(QLabel("형식"))
         self.fmt = QComboBox()
