@@ -56,6 +56,21 @@ DATA_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False
 SETTINGS_FILE = DATA_DIR / "settings.json"
 SUBS_FILE = DATA_DIR / "subscriptions.json"
 
+# 처음 설치하면 자동으로 들어가는 구독 채널 (지워도 다시 생기지 않음)
+DEFAULT_SUBS = [
+    {"name": "새봄교회", "url": "https://www.youtube.com/channel/UCc6ibkPb6pjwxNr9W-jZ99w"},
+]
+
+
+def channel_feeds(url: str) -> list[str]:
+    """채널 주소는 '동영상'과 '실시간(지난 방송)' 탭을 따로 읽어야 영상 목록이 나온다."""
+    u = url.rstrip("/")
+    if re.search(r"/(videos|streams|shorts|playlists?)$", u) or "list=" in u or "watch?" in u:
+        return [u]
+    if re.search(r"youtube\.com/(channel/|@|c/|user/)", u):
+        return [u + "/videos", u + "/streams"]
+    return [u]
+
 
 def app_version() -> int:
     """빌드 때 VERSION 파일에 적힌 번호(GitHub 릴리스 vN). 개발 중이면 0."""
@@ -133,6 +148,7 @@ class Settings:
     sub_langs: str = "ko,en"
     playlist_subfolder: bool = True
     concurrent: int = 2
+    default_subs_added: bool = False
 
     @classmethod
     def load(cls) -> "Settings":
@@ -282,7 +298,10 @@ class InfoWorker(QThread):
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(self.url, download=False)
         except Exception as e:  # noqa: BLE001
-            self.failed.emit(str(e))
+            if self.sub is not None:
+                self.sub_result.emit(self.sub, [], self.mode, self.quality)
+            else:
+                self.failed.emit(str(e))
             return
         entries = info.get("entries")
         if entries is not None:
@@ -522,6 +541,13 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(ico)))
         self.settings = Settings.load()
         self.subs: list[dict] = load_json(SUBS_FILE, [])
+        if not self.settings.default_subs_added:
+            for d in DEFAULT_SUBS:
+                if not any(x["url"].rstrip("/") == d["url"] for x in self.subs):
+                    self.subs.append({"name": d["name"], "url": d["url"], "seen": None})
+            self.settings.default_subs_added = True
+            self.settings.save()
+            self._save_subs()
         self.items: dict[str, Item] = {}
         self.widgets: dict[str, ItemWidget] = {}
         self.workers: dict[str, DownloadWorker] = {}
@@ -532,6 +558,7 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._pump)
         self._timer.start(500)
+        QTimer.singleShot(3000, self._init_new_subs)
         self._upd_threads: list[QThread] = []
         if getattr(sys, "frozen", False):
             QTimer.singleShot(1500, self._check_update)
@@ -1026,70 +1053,98 @@ class MainWindow(QMainWindow):
         self._open_dir(p)
 
     # ---------- 구독
+    def _save_subs(self):
+        save_json(SUBS_FILE, [{k: v for k, v in x.items() if not k.startswith("_")} for x in self.subs])
+
     def _refresh_subs(self):
         self.sub_list.clear()
-        for s in self.subs:
-            self.sub_list.addItem(f"{s['name']}   —   {s['url']}   (확인한 영상 {len(s.get('seen', []))}개)")
+        for x in self.subs:
+            seen = x.get("seen")
+            state = "처음 확인 대기" if seen is None else f"확인한 영상 {len(seen)}개"
+            self.sub_list.addItem(f"{x['name']}   —   {x['url']}   ({state})")
 
     def subscribe(self):
         u = self._valid_url()
         if not u:
             return
         self.statusBar().showMessage("채널 정보를 확인하는 중…")
-        w = InfoWorker(u, limit=30)
+        w = InfoWorker(u, limit=1)
         w.channel.connect(self._on_channel)
         w.failed.connect(self._on_info_failed)
         self._keep(w)
 
     def _on_channel(self, ch: dict):
-        if not ch.get("url"):
+        url = (ch.get("url") or "").rstrip("/")
+        if not url:
             QMessageBox.warning(self, "구독", "채널 정보를 찾지 못했습니다."); return
-        if any(s["url"] == ch["url"] for s in self.subs):
+        url = re.sub(r"/(videos|streams|shorts|featured)$", "", url)
+        if any(x["url"].rstrip("/") == url for x in self.subs):
             QMessageBox.information(self, "구독", "이미 구독 중인 채널입니다."); return
-        if not ch.get("seen"):
-            # 영상 하나로 구독한 경우: 채널 목록을 한 번 더 읽어 현재 영상들을 '본 것'으로 기록
-            w = InfoWorker(ch["url"], limit=30)
-            w.channel.connect(self._on_channel)
-            self._keep(w)
-            return
-        self.subs.append({"name": ch["name"], "url": ch["url"], "seen": ch["seen"]})
-        save_json(SUBS_FILE, self.subs)
+        sub = {"name": ch.get("name") or url, "url": url, "seen": None}
+        self.subs.append(sub)
+        self._save_subs()
         self._refresh_subs()
-        self.statusBar().showMessage(f"'{ch['name']}' 채널을 구독했습니다. 이후 올라오는 새 영상만 받습니다.", 5000)
         self.tabs.setCurrentIndex(1)
+        self._check_sub(sub, self._mode(), self.quality.currentText())  # 지금 있는 영상을 기준으로 기록
+        self.statusBar().showMessage(f"'{sub['name']}' 채널을 구독했습니다. 이후 올라오는 새 영상만 받습니다.", 5000)
 
     def remove_sub(self):
         row = self.sub_list.currentRow()
         if row < 0:
             return
         self.subs.pop(row)
-        save_json(SUBS_FILE, self.subs)
+        self._save_subs()
         self._refresh_subs()
+
+    def _init_new_subs(self):
+        for x in self.subs:
+            if x.get("seen") is None and not x.get("_pending"):
+                self._check_sub(x, self._mode(), self.quality.currentText())
+
+    def _check_sub(self, sub: dict, mode: str, q: str):
+        feeds = channel_feeds(sub["url"])
+        if sub.get("seen") is None:
+            sub["_init"] = True
+            sub["seen"] = []
+        sub["_pending"] = len(feeds)
+        sub["_new"] = 0
+        for f in feeds:
+            w = InfoWorker(f, limit=30, mode=mode, quality=q, sub=sub)
+            w.sub_result.connect(self._on_sub_result)
+            self._keep(w)
 
     def check_subs(self):
         if not self.subs:
             QMessageBox.information(self, "구독", "구독한 채널이 없습니다."); return
         mode, q = self._mode(), self.quality.currentText()
         self.statusBar().showMessage("새 영상을 확인하는 중…")
-        for s in self.subs:
-            w = InfoWorker(s["url"], limit=30, mode=mode, quality=q, sub=s)
-            w.sub_result.connect(self._on_sub_result)
-            self._keep(w)
+        for x in self.subs:
+            if not x.get("_pending"):
+                self._check_sub(x, mode, q)
 
-    def _on_sub_result(self, s: dict, items: list, mode: str, q: str):
-        seen = set(s.get("seen", []))
+    def _on_sub_result(self, sub: dict, items: list, mode: str, q: str):
+        seen = set(sub.get("seen") or [])
         new = []
         for u, title in items:
-            vid = re.search(r"(?:v=|/shorts/|youtu\.be/)([\w-]{11})", u)
+            vid = re.search(r"(?:v=|/shorts/|/live/|youtu\.be/)([\w-]{11})", u)
             key = vid.group(1) if vid else u
             if key not in seen:
-                new.append((u, title)); seen.add(key)
-        s["seen"] = list(seen)
-        save_json(SUBS_FILE, self.subs)
+                seen.add(key)
+                new.append((u, title))
+        sub["seen"] = list(seen)
+        sub["_pending"] = max(0, sub.get("_pending", 1) - 1)
+        if sub.get("_init"):
+            new = []  # 처음 확인: 지금까지 올라온 영상은 받지 않고 기준으로만 기록
         if new:
-            self._queue_items(new, s["name"], mode, q)
+            self._queue_items(new, sub["name"], mode, q)
+            sub["_new"] = sub.get("_new", 0) + len(new)
+        if sub["_pending"] == 0:
+            if sub.pop("_init", None):
+                self.statusBar().showMessage(f"{sub['name']}: 지금까지 올라온 영상 {len(seen)}개를 기준으로 삼았습니다. 이후 새 영상만 받습니다.", 6000)
+            else:
+                self.statusBar().showMessage(f"{sub['name']}: 새 영상 {sub.get('_new', 0)}개", 5000)
+        self._save_subs()
         self._refresh_subs()
-        self.statusBar().showMessage(f"{s['name']}: 새 영상 {len(new)}개", 4000)
 
     def closeEvent(self, e):
         for it in self.items.values():
