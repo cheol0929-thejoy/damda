@@ -459,6 +459,20 @@ QCheckBox { spacing: 8px; }
 """
 
 
+def app_logo(size: int) -> QPixmap:
+    """DA·M·DA 앱 아이콘 그림을 쓴다. 파일이 없으면 그려서 대신한다."""
+    for d in (BASE_DIR, DATA_DIR):
+        f = d / "damda_1024.png"
+        if f.exists():
+            pm = QPixmap(str(f))
+            if not pm.isNull():
+                dpr = QApplication.instance().devicePixelRatio() if QApplication.instance() else 1.0
+                pm = pm.scaled(int(size * dpr), int(size * dpr), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm.setDevicePixelRatio(dpr)
+                return pm
+    return make_logo(size)
+
+
 def make_logo(size: int = 36) -> QPixmap:
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
@@ -597,7 +611,7 @@ class MainWindow(QMainWindow):
         h.setSpacing(14)
 
         logo = QLabel()
-        logo.setPixmap(make_logo(36))
+        logo.setPixmap(app_logo(48))
         h.addWidget(logo)
         name_box = QVBoxLayout()
         name_box.setSpacing(0)
@@ -700,7 +714,7 @@ class MainWindow(QMainWindow):
         ev = QVBoxLayout(empty)
         ev.addStretch(1)
         lg = QLabel()
-        lg.setPixmap(make_logo(64))
+        lg.setPixmap(app_logo(96))
         lg.setAlignment(Qt.AlignCenter)
         ev.addWidget(lg)
         t1 = QLabel("링크를 붙여넣어 시작하세요")
