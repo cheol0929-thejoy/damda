@@ -327,6 +327,12 @@ class InfoWorker(QThread):
 
 class UpdateChecker(QThread):
     found = Signal(int)          # 새 버전 번호
+    checked = Signal(int)        # 확인한 최신 버전 번호 (새 버전이 없어도 보냄)
+    failed = Signal(str)
+
+    def __init__(self, manual: bool = False):
+        super().__init__()
+        self.manual = manual
 
     def run(self):
         try:
@@ -334,10 +340,14 @@ class UpdateChecker(QThread):
             with urllib.request.urlopen(req, timeout=8) as r:
                 tag = json.load(r).get("tag_name", "")
             latest = int(str(tag).lstrip("v"))
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            if self.manual:
+                self.failed.emit(str(e))
             return
         if APP_VERSION and latest > APP_VERSION:
             self.found.emit(latest)
+        elif self.manual:
+            self.checked.emit(latest)
 
 
 class UpdateDownloader(QThread):
@@ -440,6 +450,8 @@ QProgressBar::chunk { background: #e53935; border-radius: 2px; }
 QFrame#card { background: transparent; }
 QLabel#muted { color: #b89a9d; }
 QLabel#footer { color: #b89a9d; font-size: 12px; }
+QPushButton#updbtn { color: #b89a9d; }
+QPushButton#updbtn[hasNew="true"] { color: #1a0f10; background: #ffd54f; border-color: #ffd54f; font-weight: bold; }
 QFrame#update { background: #3a2a10; border-bottom: 1px solid #6b4e1a; }
 QLabel#update { color: #ffd54f; }
 QFrame#footer { background: #241618; border-top: 1px solid #3b2426; }
@@ -612,6 +624,12 @@ class MainWindow(QMainWindow):
         b_paste.setMinimumHeight(34)
         b_paste.clicked.connect(lambda: self.url.setText(QApplication.clipboard().text().strip()))
         row1.addWidget(b_paste)
+        self.btn_update = QPushButton(f"업데이트  v{APP_VERSION}" if APP_VERSION else "업데이트")
+        self.btn_update.setObjectName("updbtn")
+        self.btn_update.setMinimumHeight(34)
+        self.btn_update.setToolTip("새 버전이 있는지 지금 확인합니다")
+        self.btn_update.clicked.connect(self._manual_check_update)
+        row1.addWidget(self.btn_update)
         mid.addLayout(row1)
 
         # 2행: 모드 토글 · 형식 · 화질 · 구독 · 다운로드
@@ -805,8 +823,41 @@ class MainWindow(QMainWindow):
         w.start()
 
     def _on_update_found(self, latest: int):
+        self._latest = latest
         self.upd_label.setText(f"새 버전 v{latest}이 있습니다. (지금 v{APP_VERSION})  업데이트하면 프로그램이 잠시 닫혔다 다시 열립니다.")
         self.upd_bar.show()
+        self.btn_update.setText(f"새 버전 v{latest}")
+        self.btn_update.setProperty("hasNew", "true")
+        self.btn_update.style().unpolish(self.btn_update)
+        self.btn_update.style().polish(self.btn_update)
+        self.btn_update.setEnabled(True)
+
+    def _manual_check_update(self):
+        if getattr(self, "_latest", 0) > APP_VERSION:   # 이미 새 버전을 찾아 둠 → 바로 업데이트
+            self.upd_bar.show()
+            self._start_update()
+            return
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(self, "업데이트", "개발용 실행(파이썬)에서는 업데이트를 쓰지 않습니다. exe에서 사용하세요.")
+            return
+        self.btn_update.setEnabled(False)
+        self.btn_update.setText("확인 중…")
+        w = UpdateChecker(manual=True)
+        w.found.connect(self._on_update_found)
+        w.checked.connect(self._on_update_none)
+        w.failed.connect(self._on_update_check_failed)
+        self._upd_threads.append(w)
+        w.start()
+
+    def _on_update_none(self, latest: int):
+        self.btn_update.setEnabled(True)
+        self.btn_update.setText(f"업데이트  v{APP_VERSION}")
+        self.statusBar().showMessage(f"최신 버전입니다 (v{APP_VERSION}).", 4000)
+
+    def _on_update_check_failed(self, msg: str):
+        self.btn_update.setEnabled(True)
+        self.btn_update.setText(f"업데이트  v{APP_VERSION}")
+        self.statusBar().showMessage("업데이트를 확인하지 못했습니다. 인터넷 연결을 확인해 주세요.", 5000)
 
     def _start_update(self):
         if any(it.status == "진행" for it in self.items.values()):
